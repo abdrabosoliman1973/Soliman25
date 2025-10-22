@@ -1,89 +1,50 @@
-def paraphrase_with_mistral(text, model, max_tokens=2000, temperature=0.7):
-    """
-    Robust paraphrasing function compatible with LM Studio chat-completion API.
-    Cleans malformed or truncated responses gracefully.
-    """
+import re
 
-    import re
-    import json
-    import html
-
-    system_prompt = (
-        "You are an expert academic writer. Paraphrase the following text while:\n"
-        "- Preserving all citations (e.g., Author et al., Year)\n"
-        "- Maintaining all numerical values and statistics\n"
-        "- Keeping technical terminology intact\n"
-        "- Enhancing clarity and readability\n"
-        "- Using varied sentence structures\n"
-        "- Maintaining the original meaning and tone.\n"
-        "Return only the paraphrased text. Do not include control symbols, tags, or markers."
+def paraphrase_with_mistral(text, max_tokens=2000, temperature=0.7):
+    """
+    Paraphrase text using the Paraphrase-Mistral7B model.
+    
+    Parameters:
+    - text: The text to paraphrase
+    - max_tokens: Maximum tokens to generate
+    - temperature: Sampling temperature (0.0-1.0)
+    
+    Returns:
+    - Cleaned paraphrased text
+    """
+    prompt = f"""<s>[INST] You are an expert academic writer. Paraphrase the following text while:\n- Preserving all citations (e.g., Author et al., Year)\n- Maintaining all numerical values and statistics\n- Keeping technical terminology intact\n- Enhancing clarity and readability\n- Using varied sentence structures\n- Maintaining the original meaning and tone\n\nText to paraphrase:\n{text}\n\nProvide only the paraphrased text without any introductory phrases. [/INST]</s>\n"""
+    response = paraphrase_model(
+        prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=0.9,
+        repeat_penalty=1.1,
+        stop=["\n<", "</s>", "[INST]", "Section::", "UL::", "UL", "BLETER", "Prov by", "BERER", "LETER"],
+        echo=False
     )
+    txt = response['choices'][0]['text'].replace("[/INST]", "").strip()
+    # Clean artifacts - aggressively filter as in app
+    for stop_token in ["Section::", "UL::", "UL-", "BLETER", 'Prov by', 'LETER', 'BERER']:
+        idx = txt.find(stop_token)
+        if idx != -1:
+            txt = txt[:idx]
+    lines = txt.split('\n')
+    cleaned = []
+    for line in lines:
+        if (
+            not line.strip() or
+            re.match(r'^[^a-zA-Z]*$', line) or
+            'UL::' in line or 'Section::' in line or 'Prov by' in line or 'BLETER' in line or 'LETER' in line or 'BERER' in line
+        ):
+            continue
+        if re.match(r'^(?:\s*[A-Z]\s*){5,}$', line.strip()):
+            continue
+        cleaned.append(line)
+    txt = ' '.join(cleaned).strip()
+    sentences = re.findall(r'([A-Z][^.!?\n]{7,}[.!?])', txt)
+    if sentences:
+        return ' '.join(sentences)
+    return txt if txt else '(No meaningful content returned, try a shorter or different input prompt.)'
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": text}
-    ]
-
-    try:
-        # use chat completions endpoint for stable models
-        response = requests.post(
-            "http://localhost:1234/v1/chat/completions",
-            headers={"Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": 0.95,
-                "stream": False
-            },
-            timeout=180
-        )
-
-        response.raise_for_status()
-        data = response.json()
-
-        # Try multiple fallback paths depending on model output shape
-        raw_text = ""
-        if "choices" in data:
-            choice = data["choices"][0]
-            if "message" in choice and "content" in choice["message"]:
-                raw_text = choice["message"]["content"]
-            elif "text" in choice:
-                raw_text = choice["text"]
-        elif "text" in data:
-            raw_text = data["text"]
-
-        # --- CLEANUP PHASE ---
-        if not raw_text:
-            return "⚠️ Model returned no text. Try increasing max_tokens or lowering temperature."
-
-        text_clean = html.unescape(raw_text)
-
-        # remove known junk tokens or pseudo markers
-        text_clean = re.sub(r"(?i)(UL|BLET|BLETER|LET|SECTION|LIST|ENDLIST|::|--|###|@@@|\\|\/)+", " ", text_clean)
-        text_clean = text_clean.replace("<s>", "").replace("</s>", "")
-        text_clean = text_clean.replace("[INST]", "").replace("[/INST]", "")
-        text_clean = text_clean.replace("ASSISTANT:", "").replace("USER:", "")
-        text_clean = text_clean.replace("```", "").replace("**", "")
-        text_clean = text_clean.strip()
-
-        # remove repeating garbage patterns
-        text_clean = re.sub(r"([A-Z]{3,}\s*){3,}", "", text_clean)
-        text_clean = re.sub(r"([:;.,-])\1{1,}", r"\1", text_clean)
-
-        # collapse multiple spaces
-        text_clean = re.sub(r"\s{2,}", " ", text_clean).strip()
-
-        # heuristic fix for truncation (unfinished sentence)
-        if not text_clean.endswith(('.', '!', '?', '”', '."')):
-            text_clean += "."
-
-        return text_clean
-
-    except requests.exceptions.RequestException as e:
-        return f"❌ Connection error: {e}"
-    except json.JSONDecodeError:
-        return "⚠️ Response was malformed JSON. Try rerunning."
-    except Exception as e:
-        return f"⚠️ Unexpected error: {str(e)}"
+print("✅ Paraphrasing function updated for strict artifact cleanup!")
+print("\nUsage: paraphrase_with_mistral(your_text)")
